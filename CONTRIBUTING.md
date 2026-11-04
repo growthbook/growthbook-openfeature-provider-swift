@@ -42,14 +42,21 @@ swift test
 
 1. Branch from `main`.
 2. Run `swift build` and `swift test`.
-3. Use conventional-commit subjects (`fix:`, `feat:`, `test:`).
-4. Open the PR against `main` and describe what changed and how to verify it.
+3. Open the PR against `main` with a [Conventional
+   Commits](https://www.conventionalcommits.org) title (`fix:`, `feat:`,
+   `docs:`, and `!` for breaking changes). CI checks it, and it becomes the
+   squash commit that drives the next version.
+4. Describe what changed and how to verify it.
 
 ## Releasing
 
-Maintainers release by tagging `main` with a semver version (for example
-`0.2.0`) and creating a GitHub release. SwiftPM consumes the tag directly; there
-is nothing to publish.
+Releases use [release-please](https://github.com/googleapis/release-please).
+Each merge to `main` updates a release PR with the next version and changelog.
+Merging that PR tags the release and creates the GitHub release; SwiftPM
+consumes the tag directly, so there is nothing to publish.
+
+Before 1.0, `feat:` bumps the minor version, `fix:` bumps the patch version, and
+breaking changes bump the minor version.
 
 ## Getting help
 
