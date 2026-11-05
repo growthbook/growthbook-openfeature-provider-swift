@@ -57,6 +57,10 @@ let enabled = client.getBooleanValue(key: "new-checkout", defaultValue: false)
 - **Not supported yet:** remote evaluation and sticky bucketing. The provider throws `GrowthBookOpenFeatureProviderError` if either is configured.
 - **Shutdown:** OpenFeature Swift does not shut providers down. Call `provider.close()` before clearing or replacing the provider.
 
+## Example
+
+[`Examples/CommandLine`](Examples/CommandLine) is a small macOS program that evaluates flags through the provider. It runs offline with bundled features, or against GrowthBook with a client key.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
