@@ -184,6 +184,47 @@ final class GrowthBookOpenFeatureProviderTests: XCTestCase {
         XCTAssertEqual(result.value, "default")
     }
 
+    func testContextChangeEmitsContextChanged() async throws {
+        let api = OpenFeatureAPI()
+        let provider = try makeProvider(features: Payloads.features)
+        await api.setProviderAndWait(provider: provider, initialContext: ImmutableContext(targetingKey: "user-1"))
+
+        let changed = expectation(description: "context changed")
+        provider.observe()
+            .sink { if case .contextChanged = $0 { changed.fulfill() } }
+            .store(in: &cancellables)
+
+        await api.setEvaluationContextAndWait(evaluationContext: ImmutableContext(targetingKey: "user-2"))
+        await fulfillment(of: [changed], timeout: 2)
+        XCTAssertEqual(provider.status, .ready)
+    }
+
+    func testContextChangeKeepsStaleStatus() async throws {
+        let api = OpenFeatureAPI()
+        let network = MockNetwork(response: Payloads.featuresResponse)
+        let provider = try makeProvider(network: network, ttlSeconds: 0)
+        await api.setProviderAndWait(provider: provider)
+
+        let stale = expectation(description: "stale")
+        var contextChanges = 0
+        provider.observe()
+            .sink { event in
+                switch event {
+                case .stale: stale.fulfill()
+                case .contextChanged: contextChanges += 1
+                default: break
+                }
+            }
+            .store(in: &cancellables)
+        network.response = nil
+        try provider.refreshForTesting()
+        await fulfillment(of: [stale], timeout: 2)
+
+        await api.setEvaluationContextAndWait(evaluationContext: ImmutableContext(targetingKey: "user-2"))
+        XCTAssertEqual(contextChanges, 0)
+        XCTAssertEqual(provider.status, .stale)
+    }
+
     // MARK: - Experiments
 
     func testExperimentReportsVariantAndTracksExposureOnce() async throws {
@@ -199,6 +240,28 @@ final class GrowthBookOpenFeatureProviderTests: XCTestCase {
         XCTAssertEqual(details.variant, "1")
         XCTAssertEqual(details.reason, Reason.split.rawValue)
         XCTAssertEqual(exposures, ["experiment-flag"])
+    }
+
+    func testTrackingClosureRunsAfterTheProviderLockIsReleased() async throws {
+        var otherThreadFinished = false
+        var client: Client?
+        client = try await makeClient(
+            features: Payloads.features,
+            // The SDK reports each user's exposure once per process, so use a user no other test tracks.
+            context: ImmutableContext(targetingKey: "lock-test-user"),
+            trackingClosure: { _, _ in
+                // Waiting on another thread that evaluates a flag deadlocks if the closure runs under the lock.
+                let done = DispatchSemaphore(value: 0)
+                DispatchQueue.global().async {
+                    _ = client?.getDetails(key: "string-flag", defaultValue: "")
+                    done.signal()
+                }
+                otherThreadFinished = done.wait(timeout: .now() + 2) == .success
+            }
+        )
+
+        XCTAssertEqual(client?.getDetails(key: "experiment-flag", defaultValue: "").value, "treatment")
+        XCTAssertTrue(otherThreadFinished)
     }
 
     // MARK: - Initialization
@@ -330,6 +393,7 @@ final class GrowthBookOpenFeatureProviderTests: XCTestCase {
         let details = api.getClient().getDetails(key: "string-flag", defaultValue: "fallback")
         XCTAssertEqual(details.value, "fallback")
         XCTAssertEqual(details.errorCode, .providerFatal)
+        XCTAssertEqual(provider.status, .fatal)
     }
 
     func testMetadataName() throws {

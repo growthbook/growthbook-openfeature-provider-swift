@@ -49,13 +49,13 @@ let client = OpenFeatureAPI.shared.getClient()
 let enabled = client.getBooleanValue(key: "new-checkout", defaultValue: false)
 ```
 
-- **Context:** OpenFeature context attributes become GrowthBook attributes, and `targetingKey` becomes the `id` attribute. When the context has both, `identityPrecedence` decides which wins (`.targetingKey` by default, or `.idAttribute`). Each context change replaces all attributes. A non-empty initial context replaces the attributes in the `GrowthBookModel`; an empty one keeps them.
+- **Context:** OpenFeature context attributes become GrowthBook attributes, and `targetingKey` becomes the `id` attribute. When the context has both, `identityPrecedence` decides which wins (`.targetingKey` by default, or `.idAttribute`). Each context change replaces all attributes and emits a context-changed event while the provider is ready. A non-empty initial context replaces the attributes in the `GrowthBookModel`; an empty one keeps them.
 - **Readiness:** the provider is ready immediately when features are supplied or cached. Otherwise it waits for the first fetch, up to `initializationTimeout` (10 seconds by default), and reports an error if no features loaded. Evaluations return the caller's default until features are available.
 - **Updates:** feature refreshes and streaming updates emit a configuration-changed event when flags change. A failed refresh keeps serving the last features and reports the provider as stale.
 - **Values:** values are never converted between types. Integer flags must hold whole numbers, and a `null` flag value returns the caller's default.
-- **Tracking:** experiment exposures are reported through `trackingClosure` and plugins, as with the GrowthBook SDK.
+- **Tracking:** experiment exposures are reported through `trackingClosure` and plugins, as with the GrowthBook SDK. `trackingClosure` runs after the provider releases its internal lock, so a slow closure doesn't block other evaluations; plugins still run during the evaluation.
 - **Not supported yet:** remote evaluation and sticky bucketing. The provider throws `GrowthBookOpenFeatureProviderError` if either is configured.
-- **Shutdown:** OpenFeature Swift does not shut providers down. Call `provider.close()` before clearing or replacing the provider.
+- **Shutdown:** OpenFeature Swift does not shut providers down. Call `provider.close()` before clearing or replacing the provider. After `close()`, the provider reports a fatal status and evaluations return the caller's default.
 
 ## Example
 
