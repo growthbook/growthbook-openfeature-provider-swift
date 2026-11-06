@@ -42,7 +42,7 @@ public final class GrowthBookOpenFeatureProvider: FeatureProvider, @unchecked Se
     private let statusTracker = ProviderStatusTracker()
     /// Serializes refresh results so they are handled outside the SDK's lock.
     private let queue = DispatchQueue(label: "io.growthbook.openfeature.provider")
-    /// Guards the state below. Recursive so a tracking callback that evaluates another flag can't deadlock.
+    /// Guards the state below. Recursive so the SDK can call back into the provider while it's held.
     private let lock = NSRecursiveLock()
     private(set) var sdk: GrowthBookSDK?
     private var appliedContext = ContextSnapshot(nil)
@@ -50,6 +50,8 @@ public final class GrowthBookOpenFeatureProvider: FeatureProvider, @unchecked Se
     private var featureSnapshot: [String: Data] = [:]
     private var pendingInitialization: (() -> Void)?
     private var isClosed = false
+    /// Exposures recorded during the current evaluation, reported once `lock` is released. `nil` outside evaluations.
+    private var pendingExposures: [(Experiment, ExperimentResult)]?
 
     /// Creates a provider. The GrowthBook SDK is created when OpenFeature initializes the provider.
     ///
@@ -139,6 +141,11 @@ public final class GrowthBookOpenFeatureProvider: FeatureProvider, @unchecked Se
             self.lock.lock()
             self.apply(context: newContext)
             self.lock.unlock()
+            // OpenFeature Swift doesn't announce context changes itself. Skip the event while stale, in
+            // error or closed, because it would report the provider as ready.
+            if self.statusTracker.status == .ready {
+                self.statusTracker.send(.contextChanged(nil))
+            }
             promise(.success(()))
         }
     }
@@ -161,10 +168,8 @@ public final class GrowthBookOpenFeatureProvider: FeatureProvider, @unchecked Se
         lock.unlock()
 
         sdk?.close()
-        if let pending {
-            statusTracker.send(.error(ProviderEventDetails(message: "Provider closed", errorCode: .providerFatal)))
-            pending()
-        }
+        statusTracker.send(.error(ProviderEventDetails(message: "Provider closed", errorCode: .providerFatal)))
+        pending?()
     }
 
     // MARK: - Evaluation
@@ -206,8 +211,28 @@ public final class GrowthBookOpenFeatureProvider: FeatureProvider, @unchecked Se
         convert: (JSON) -> T?
     ) throws -> ProviderEvaluation<T> {
         lock.lock()
-        defer { lock.unlock() }
+        pendingExposures = []
+        let outcome = Result {
+            try evaluateLocked(key: key, defaultValue: defaultValue, context: context, convert: convert)
+        }
+        let exposures = pendingExposures ?? []
+        pendingExposures = nil
+        lock.unlock()
 
+        // Report exposures without holding the lock, so a slow tracking closure doesn't block other evaluations.
+        for (experiment, result) in exposures {
+            configuration.trackingClosure(experiment, result)
+        }
+        return try outcome.get()
+    }
+
+    /// Evaluates a flag with `lock` held, so the result always belongs to the applied context.
+    private func evaluateLocked<T>(
+        key: String,
+        defaultValue: T,
+        context: EvaluationContext?,
+        convert: (JSON) -> T?
+    ) throws -> ProviderEvaluation<T> {
         if isClosed {
             throw OpenFeatureError.providerFatalError(message: "Provider closed")
         }
@@ -248,6 +273,10 @@ public final class GrowthBookOpenFeatureProvider: FeatureProvider, @unchecked Se
                 self?.handleRefresh(error: error)
             }
         }
+        var model = model
+        model.trackingClosure = { [weak self] experiment, result in
+            self?.recordExposure(experiment: experiment, result: result)
+        }
         let builder = GrowthBookBuilder(
             growthBookBuilderModel: model,
             apiRequestHeaders: model.apiRequestHeaders ?? [:],
@@ -260,6 +289,19 @@ public final class GrowthBookOpenFeatureProvider: FeatureProvider, @unchecked Se
             _ = builder.setNetworkDispatcher(networkDispatcher: networkDispatcher)
         }
         return builder.initializer()
+    }
+
+    /// Queues an exposure from the current evaluation, or reports it straight away outside one.
+    private func recordExposure(experiment: Experiment, result: ExperimentResult) {
+        lock.lock()
+        let isEvaluating = pendingExposures != nil
+        if isEvaluating {
+            pendingExposures?.append((experiment, result))
+        }
+        lock.unlock()
+        if !isEvaluating {
+            configuration.trackingClosure(experiment, result)
+        }
     }
 
     /// Replaces the SDK's attributes when the context differs from the last one applied. Caller holds `lock`.
